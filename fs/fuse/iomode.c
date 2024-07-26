@@ -122,7 +122,7 @@ static int fuse_file_uncached_io_open(struct inode *inode,
 
 	err = fuse_inode_uncached_io_start(fi, fb);
 	if (err)
-		return err;
+		return fuse_err_EIO("failed to start uncached I/O", err);
 
 	WARN_ON(ff->iomode != IOM_NONE);
 	ff->iomode = IOM_UNCACHED;
@@ -170,14 +170,25 @@ static int fuse_file_passthrough_open(struct inode *inode, struct file *file)
 	struct fuse_file *ff = file->private_data;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_backing *fb;
+	u64 backing_id;
+	bool is_64bit = ff->open_flags & FUSE_BACKING_ID_64;
 	int err;
 
-	/* Check allowed conditions for file open in passthrough mode */
-	if (!IS_ENABLED(CONFIG_FUSE_PASSTHROUGH) || !fc->passthrough ||
-	    (ff->open_flags & ~FOPEN_PASSTHROUGH_MASK))
-		return -EINVAL;
+	ff->open_flags &= ~FUSE_BACKING_ID_64;
 
-	fb = fuse_passthrough_open(file, ff->args->open_outarg.backing_id);
+	/* Check allowed conditions for file open in passthrough mode */
+	if (!IS_ENABLED(CONFIG_FUSE_PASSTHROUGH) || !fc->passthrough)
+		return fuse_EIO("passthrough not enabled");
+
+	if (ff->open_flags & ~FOPEN_PASSTHROUGH_MASK)
+		return fuse_EIO("conflicting open flags");
+
+	if (!is_64bit)
+		backing_id = ff->args->open_outarg.backing_id;
+	else
+		backing_id = ff->args->open_outarg.backing_id_64;
+
+	fb = fuse_passthrough_open(file, backing_id, is_64bit);
 	if (IS_ERR(fb))
 		return PTR_ERR(fb);
 
@@ -200,7 +211,7 @@ int fuse_file_io_open(struct file *file, struct inode *inode)
 	int err;
 
 	/*
-	 * io modes are not relevant with DAX and with server that does not
+	 * io modes are not relevant with virtiofs DAX and with server that does not
 	 * implement open.
 	 */
 	if (FUSE_IS_VDAX(inode) || !ff->args)
@@ -212,7 +223,7 @@ int fuse_file_io_open(struct file *file, struct inode *inode)
 	 */
 	err = -EINVAL;
 	if (fuse_inode_backing(fi) && !(ff->open_flags & FOPEN_PASSTHROUGH))
-		goto fail;
+		return fuse_EIO("FOPEN_PASSTHROUGH expected");
 
 	/*
 	 * FOPEN_PARALLEL_DIRECT_WRITES requires FOPEN_DIRECT_IO.
@@ -236,20 +247,8 @@ int fuse_file_io_open(struct file *file, struct inode *inode)
 		err = fuse_file_passthrough_open(inode, file);
 	else
 		err = fuse_file_cached_io_open(inode, ff);
-	if (err)
-		goto fail;
 
-	return 0;
-
-fail:
-	pr_debug("failed to open file in requested io mode (open_flags=0x%x, err=%i).\n",
-		 ff->open_flags, err);
-	/*
-	 * The file open mode determines the inode io mode.
-	 * Using incorrect open mode is a server mistake, which results in
-	 * user visible failure of open() with EIO error.
-	 */
-	return -EIO;
+	return err;
 }
 
 /* No more pending io and no new io possible to inode via open/mmapped file */

@@ -251,6 +251,15 @@
  *
  *  7.47
  *  - add FUSE_HAS_SYNCFS opt-in flag for privileged userspace servers
+ *  - add FUSE_NOTIFY_BACKING_CLOSE, FUSE_NOTIFY_MAP
+ *  - add struct fuse_notify_backing_close_out
+ *  - add struct fuse_notify_map_out
+ *  - add struct fuse_extent
+ *  - add backing_id_64 to fuse_open_out
+ *  - add backing_id to fuse_backing_map
+ *  - add FUSE_BACKING_IS_DEV (fuse_backing_map.flags)
+ *  - add FUSE_BACKING_ID_64 (mutiple structs)
+ *  - add FUSE_MAP_CYCLIC, FUSE_MAP_BACKING_CREATE (fuse_map_out.flags)
  */
 
 #ifndef _LINUX_FUSE_H
@@ -400,6 +409,7 @@ struct fuse_file_lock {
  *                           (FUSE_URING_ZERO_COPY) and the request carries page
  *                           payload. Otherwise reads/writes fall back to
  *                           copying.
+ * FUSE_BACKING_ID_64: backing ID is server allocated, stored in open_out.backing_id_64
  */
 #define FOPEN_DIRECT_IO		(1 << 0)
 #define FOPEN_KEEP_CACHE	(1 << 1)
@@ -410,6 +420,7 @@ struct fuse_file_lock {
 #define FOPEN_PARALLEL_DIRECT_WRITES	(1 << 6)
 #define FOPEN_PASSTHROUGH	(1 << 7)
 #define FOPEN_IO_URING_ZERO_COPY (1 << 8)
+#define FUSE_BACKING_ID_64	(1 << 30) /* used in multiple structs */
 
 /**
  * INIT request/reply flags
@@ -709,6 +720,8 @@ enum fuse_notify_code {
 	FUSE_NOTIFY_RESEND = 7,
 	FUSE_NOTIFY_INC_EPOCH = 8,
 	FUSE_NOTIFY_PRUNE = 9,
+	FUSE_NOTIFY_BACKING_CLOSE = 10,
+	FUSE_NOTIFY_MAP = 11,
 };
 
 /* The read buffer is required to be at least 8k, but may be much larger */
@@ -835,6 +848,7 @@ struct fuse_open_out {
 	uint64_t	fh;
 	uint32_t	open_flags;
 	int32_t		backing_id;
+	uint64_t	backing_id_64;
 };
 
 struct fuse_release_in {
@@ -1153,10 +1167,19 @@ struct fuse_notify_prune_out {
 	uint64_t	spare;
 };
 
+/**
+ * flags for fuse_backing_map
+ *
+ * FUSE_BACKING_IS_DEV: @fd refers to a device file
+ * FUSE_BACKING_ID_64: backing ID is server allocated, stored in @backing_id
+ */
+#define FUSE_BACKING_IS_DEV	(1 << 0)
+#define FUSE_BACKING_ID_64	(1 << 30) /* used in multiple structs */
+
 struct fuse_backing_map {
 	int32_t		fd;
 	uint32_t	flags;
-	uint64_t	padding;
+	uint64_t	backing_id;
 };
 
 /* Device ioctls: */
@@ -1191,6 +1214,37 @@ struct fuse_copy_file_range_in {
 /* For FUSE_COPY_FILE_RANGE_64 */
 struct fuse_copy_file_range_out {
 	uint64_t	bytes_copied;
+};
+
+struct fuse_notify_backing_close_out {
+	uint64_t	backing_id;
+	uint64_t	reserved;
+};
+
+/**
+ * notify_map flags
+ *
+ * FUSE_MAP_BACKING_CREATE:	create backing with the supplied ID
+ * FUSE_MAP_CYCLIC:		map repeats after last extent
+ */
+#define FUSE_MAP_BACKING_CREATE	(1 << 0)
+#define FUSE_MAP_CYCLIC		(1 << 1)
+
+struct fuse_notify_map_out {
+	uint64_t	backing_id;
+	uint32_t	num_extents;
+	uint32_t	flags;
+	uint64_t	reserved[2];
+};
+
+#define FUSE_MAX_EXTENTS 1638
+
+struct fuse_extent {
+	uint64_t	offset;		/* offset of extent into file */
+	uint64_t	length;		/* extent length */
+	uint64_t	backing_id;	/* target backing */
+	uint64_t	addr;		/* target offset within backing file/device */
+	uint64_t	reserved[2];
 };
 
 #define FUSE_SETUPMAPPING_FLAG_WRITE (1ull << 0)

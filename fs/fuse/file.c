@@ -28,6 +28,7 @@ static int fuse_send_open(struct fuse_mount *fm, u64 nodeid,
 {
 	struct fuse_open_in inarg;
 	FUSE_ARGS(args);
+	int res;
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.flags = open_flags & ~(O_CREAT | O_EXCL | O_NOCTTY);
@@ -45,10 +46,13 @@ static int fuse_send_open(struct fuse_mount *fm, u64 nodeid,
 	args.in_args[0].size = sizeof(inarg);
 	args.in_args[0].value = &inarg;
 	args.out_numargs = 1;
+	args.out_argvar = true; /* compat */
 	args.out_args[0].size = sizeof(*outargp);
 	args.out_args[0].value = outargp;
 
-	return fuse_simple_request(fm, &args);
+	res = fuse_simple_request(fm, &args);
+
+	return res < 0 ? res : 0;
 }
 
 struct fuse_file *fuse_file_alloc(struct fuse_mount *fm, bool release)
@@ -293,7 +297,7 @@ static int fuse_open(struct inode *inode, struct file *file)
 	if (!err) {
 		if (is_truncate)
 			truncate_pagecache(inode, 0);
-		else if (!(ff->open_flags & FOPEN_KEEP_CACHE))
+		else if (!(ff->open_flags & FOPEN_KEEP_CACHE) && !IS_DAX(inode))
 			invalidate_inode_pages2(inode->i_mapping);
 	}
 out_unlock:
@@ -311,7 +315,7 @@ static void fuse_prepare_release(struct fuse_inode *fi, struct fuse_file *ff,
 	struct fuse_conn *fc = ff->fm->fc;
 	struct fuse_release_args *ra = &ff->args->release_args;
 
-	if (fuse_file_passthrough(ff))
+	if (fuse_is_passthrough(ff))
 		fuse_passthrough_release(ff, fuse_inode_backing(fi));
 
 	/* Inode is NULL on error path of fuse_create_open() */
@@ -1842,7 +1846,7 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	/* FOPEN_DIRECT_IO overrides FOPEN_PASSTHROUGH */
 	if (ff->open_flags & FOPEN_DIRECT_IO)
 		return fuse_direct_read_iter(iocb, to);
-	else if (fuse_file_passthrough(ff))
+	else if (fuse_is_passthrough(ff))
 		return fuse_passthrough_read_iter(iocb, to);
 	else
 		return fuse_cache_read_iter(iocb, to);
@@ -1863,7 +1867,7 @@ static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	/* FOPEN_DIRECT_IO overrides FOPEN_PASSTHROUGH */
 	if (ff->open_flags & FOPEN_DIRECT_IO)
 		return fuse_direct_write_iter(iocb, from);
-	else if (fuse_file_passthrough(ff))
+	else if (fuse_is_passthrough(ff))
 		return fuse_passthrough_write_iter(iocb, from);
 	else
 		return fuse_cache_write_iter(iocb, from);
@@ -1879,7 +1883,7 @@ static ssize_t fuse_splice_read(struct file *in, loff_t *ppos,
 
 	if (ff->open_flags & FOPEN_DIRECT_IO)
 		return copy_splice_read(in, ppos, pipe, len, flags);
-	else if (fuse_file_passthrough(ff))
+	else if (fuse_is_passthrough(ff))
 		return fuse_passthrough_splice_read(in, ppos, pipe, len, flags);
 	else
 		return filemap_splice_read(in, ppos, pipe, len, flags);
@@ -1891,7 +1895,7 @@ static ssize_t fuse_splice_write(struct pipe_inode_info *pipe, struct file *out,
 	struct fuse_file *ff = out->private_data;
 
 	/* FOPEN_DIRECT_IO overrides FOPEN_PASSTHROUGH */
-	if (fuse_file_passthrough(ff) && !(ff->open_flags & FOPEN_DIRECT_IO))
+	if (fuse_is_passthrough(ff) && !(ff->open_flags & FOPEN_DIRECT_IO))
 		return fuse_passthrough_splice_write(pipe, out, ppos, len, flags);
 	else
 		return iter_file_splice_write(pipe, out, ppos, len, flags);
@@ -2406,7 +2410,7 @@ static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 	 * in passthrough mode, either mmap to backing file or fail mmap,
 	 * because mixing cached mmap and passthrough io mode is not allowed.
 	 */
-	if (fuse_file_passthrough(ff))
+	if (fuse_is_passthrough(ff))
 		return fuse_passthrough_mmap(file, vma);
 	else if (fuse_inode_backing(get_fuse_inode(inode)))
 		return -ENODEV;

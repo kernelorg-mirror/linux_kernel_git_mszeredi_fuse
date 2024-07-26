@@ -11,6 +11,12 @@
 # define pr_fmt(fmt) "fuse: " fmt
 #endif
 
+#define fuse_EIO(msg) (pr_notice_once("%s: %s\n", __func__, msg), -EIO)
+#define fuse_err_EIO(msg, err) (pr_notice_once("%s: %s (%d)\n", __func__, msg, (int) (err)), -EIO)
+
+#define fuse_ptr_EIO(msg) ERR_PTR(fuse_EIO(msg))
+#define fuse_err_ptr_EIO(msg, err) ERR_PTR(fuse_err_EIO(msg, err))
+
 #include "args.h"
 #include <linux/fuse.h>
 #include <linux/fs.h>
@@ -22,7 +28,7 @@
 #include <linux/backing-dev.h>
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
-#include <linux/rbtree.h>
+#include <linux/rbtree_types.h>
 #include <linux/poll.h>
 #include <linux/workqueue.h>
 #include <linux/kref.h>
@@ -30,6 +36,7 @@
 #include <linux/pid_namespace.h>
 #include <linux/refcount.h>
 #include <linux/user_namespace.h>
+#include <linux/rhashtable-types.h>
 
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
@@ -86,11 +93,32 @@ struct fuse_submount_lookup {
 	struct fuse_forget_link *forget;
 };
 
+enum fuse_backing_type {
+	FUSE_BACKING_PATH,
+	FUSE_BACKING_DAXDEV,
+	FUSE_BACKING_EXTMAP,
+};
+
 /* Container for data related to mapping to backing file */
 struct fuse_backing {
-	struct file *file;
-	const struct cred *cred;
+	enum fuse_backing_type type;
 
+	union {
+		struct {
+			struct path path;
+			const struct cred *cred;
+		};
+		struct {
+			struct dax_device *dax_dev;
+			bool dax_error;
+		};
+		struct {
+			struct rb_root extents;
+			uint64_t cycle_length;
+		};
+	};
+	u64 backing_id;
+	struct rhash_head hash_node;
 	/* refcount */
 	refcount_t count;
 	struct rcu_head rcu;
@@ -770,6 +798,9 @@ struct fuse_conn {
 #ifdef CONFIG_FUSE_PASSTHROUGH
 	/** @backing_files_map: IDR for backing files ids */
 	struct idr backing_files_map;
+
+	/** @backing_64_ht: 64 bit ID lookup hash table */
+	struct rhashtable backing_64_ht;
 #endif
 };
 
@@ -1226,7 +1257,14 @@ void fuse_free_conn(struct fuse_conn *fc);
 
 /* dax.c */
 
-#define FUSE_IS_VDAX(inode) (IS_ENABLED(CONFIG_FUSE_DAX) && IS_DAX(inode))
+static inline bool FUSE_IS_VDAX(struct inode *inode)
+{
+#ifdef CONFIG_FUSE_DAX
+	return get_fuse_inode(inode)->vdax && IS_DAX(inode);
+#else
+	return false;
+#endif
+}
 
 ssize_t fuse_vdax_read_iter(struct kiocb *iocb, struct iov_iter *to);
 ssize_t fuse_vdax_write_iter(struct kiocb *iocb, struct iov_iter *from);
@@ -1266,24 +1304,17 @@ void fuse_file_release(struct inode *inode, struct fuse_file *ff,
 		       unsigned int open_flags, fl_owner_t id, bool isdir);
 
 /* backing.c */
-#ifdef CONFIG_FUSE_PASSTHROUGH
-struct fuse_backing *fuse_backing_get(struct fuse_backing *fb);
-void fuse_backing_put(struct fuse_backing *fb);
-struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, int backing_id);
-#else
 
-static inline struct fuse_backing *fuse_backing_get(struct fuse_backing *fb)
-{
-	return NULL;
-}
+#ifdef CONFIG_FUSE_PASSTHROUGH
+void fuse_backing_put(struct fuse_backing *fb);
+
+struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, u64 backing_id, bool is_64bit);
+int fuse_backing_add_64(struct fuse_conn *fc, struct fuse_backing *fb);
+bool fuse_backing_is_dax(struct fuse_backing *fb);
+#else
 
 static inline void fuse_backing_put(struct fuse_backing *fb)
 {
-}
-static inline struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc,
-						       int backing_id)
-{
-	return NULL;
 }
 #endif
 
@@ -1310,16 +1341,12 @@ static inline struct fuse_backing *fuse_inode_backing_set(struct fuse_inode *fi,
 #endif
 }
 
-struct fuse_backing *fuse_passthrough_open(struct file *file, int backing_id);
+struct fuse_backing *fuse_passthrough_open(struct file *file, uint64_t backing_id, bool is_64bit);
 void fuse_passthrough_release(struct fuse_file *ff, struct fuse_backing *fb);
 
-static inline struct file *fuse_file_passthrough(struct fuse_file *ff)
+static inline bool fuse_is_passthrough(struct fuse_file *ff)
 {
-#ifdef CONFIG_FUSE_PASSTHROUGH
-	return ff->passthrough;
-#else
-	return NULL;
-#endif
+	return IS_ENABLED(CONFIG_FUSE_PASSTHROUGH) && (ff->open_flags & FOPEN_PASSTHROUGH);
 }
 
 ssize_t fuse_passthrough_read_iter(struct kiocb *iocb, struct iov_iter *iter);
@@ -1340,4 +1367,13 @@ extern void fuse_sysctl_unregister(void);
 #define fuse_sysctl_unregister()	do { } while (0)
 #endif /* CONFIG_SYSCTL */
 
+/* ext_map.c */
+
+void fuse_ext_map_destroy(struct rb_root *extents);
+ssize_t fuse_ext_map_write_iter(struct kiocb *iocb, struct iov_iter *from);
+ssize_t fuse_ext_map_read_iter(struct kiocb *iocb, struct iov_iter *to);
+int fuse_ext_map_mmap(struct file *file, struct vm_area_struct *vma);
+bool fuse_ext_map_is_dax(struct fuse_backing *fb);
+int fuse_ext_map_populate(struct fuse_conn *fc, struct fuse_notify_map_out *arg,
+			  struct fuse_extent *ext);
 #endif /* _FS_FUSE_I_H */
