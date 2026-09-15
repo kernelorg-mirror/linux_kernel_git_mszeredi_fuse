@@ -100,7 +100,7 @@ static struct inode *fuse_alloc_inode(struct super_block *sb)
 	if (!fi->forget)
 		goto out_free;
 
-	if (IS_ENABLED(CONFIG_FUSE_DAX) && !fuse_dax_inode_alloc(sb, fi))
+	if (IS_ENABLED(CONFIG_FUSE_DAX) && !fuse_vdax_inode_alloc(sb, fi))
 		goto out_free_forget;
 
 	if (IS_ENABLED(CONFIG_FUSE_PASSTHROUGH))
@@ -122,7 +122,7 @@ static void fuse_free_inode(struct inode *inode)
 	mutex_destroy(&fi->mutex);
 	kfree(fi->forget);
 #ifdef CONFIG_FUSE_DAX
-	kfree(fi->dax);
+	kfree(fi->vdax);
 #endif
 	if (IS_ENABLED(CONFIG_FUSE_PASSTHROUGH))
 		fuse_backing_put(fuse_inode_backing(fi));
@@ -148,7 +148,7 @@ static void fuse_evict_inode(struct inode *inode)
 	/* Will write inode on close/munmap and in all other dirtiers */
 	WARN_ON(inode_state_read_once(inode) & I_DIRTY_INODE);
 
-	if (FUSE_IS_DAX(inode))
+	if (FUSE_IS_VDAX(inode))
 		dax_break_layout_final(inode);
 
 	truncate_inode_pages_final(&inode->i_data);
@@ -156,8 +156,8 @@ static void fuse_evict_inode(struct inode *inode)
 	if (inode->i_sb->s_flags & SB_ACTIVE) {
 		struct fuse_conn *fc = get_fuse_conn(inode);
 
-		if (FUSE_IS_DAX(inode))
-			fuse_dax_inode_cleanup(inode);
+		if (FUSE_IS_VDAX(inode))
+			fuse_vdax_inode_cleanup(inode);
 		if (fi->nlookup) {
 			fuse_chan_queue_forget(fc->chan, fi->forget, fi->nodeid,
 					       fi->nlookup);
@@ -386,7 +386,7 @@ static void fuse_change_attributes_i(struct inode *inode, struct fuse_attr *attr
 	}
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))
-		fuse_dax_dontcache(inode, attr->flags);
+		fuse_vdax_dontcache(inode, attr->flags);
 }
 
 void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,
@@ -954,11 +954,11 @@ static int fuse_show_options(struct seq_file *m, struct dentry *root)
 			seq_printf(m, ",blksize=%lu", sb->s_blocksize);
 	}
 #ifdef CONFIG_FUSE_DAX
-	if (fc->dax_mode == FUSE_DAX_ALWAYS)
+	if (fc->vdax_mode == FUSE_VDAX_ALWAYS)
 		seq_puts(m, ",dax=always");
-	else if (fc->dax_mode == FUSE_DAX_NEVER)
+	else if (fc->vdax_mode == FUSE_VDAX_NEVER)
 		seq_puts(m, ",dax=never");
-	else if (fc->dax_mode == FUSE_DAX_INODE_USER)
+	else if (fc->vdax_mode == FUSE_VDAX_INODE_USER)
 		seq_puts(m, ",dax=inode");
 #endif
 
@@ -1017,7 +1017,7 @@ void fuse_conn_put(struct fuse_conn *fc)
 		return;
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))
-		fuse_dax_conn_free(fc);
+		fuse_vdax_conn_free(fc);
 	cancel_work_sync(&fc->epoch_work);
 	fuse_chan_release(fc->chan);
 	put_pid_ns(fc->pid_ns);
@@ -1375,11 +1375,11 @@ static void process_init_reply(struct fuse_args *args, int error)
 			}
 			if (IS_ENABLED(CONFIG_FUSE_DAX)) {
 				if (flags & FUSE_MAP_ALIGNMENT &&
-				    !fuse_dax_check_alignment(fc, arg->map_alignment)) {
+				    !fuse_vdax_check_alignment(fc, arg->map_alignment)) {
 					ok = false;
 				}
 				if (flags & FUSE_HAS_INODE_DAX)
-					fc->inode_dax = 1;
+					fc->inode_vdax = 1;
 			}
 			if (flags & FUSE_HANDLE_KILLPRIV_V2) {
 				fc->handle_killpriv_v2 = 1;
@@ -1492,9 +1492,9 @@ static struct fuse_init_args *fuse_new_init(struct fuse_mount *fm)
 		FUSE_NO_EXPORT_SUPPORT | FUSE_HAS_RESEND | FUSE_ALLOW_IDMAP |
 		FUSE_REQUEST_TIMEOUT;
 #ifdef CONFIG_FUSE_DAX
-	if (fm->fc->dax)
+	if (fm->fc->vdax)
 		flags |= FUSE_MAP_ALIGNMENT;
-	if (fuse_is_inode_dax_mode(fm->fc->dax_mode))
+	if (fuse_is_inode_vdax_mode(fm->fc->vdax_mode))
 		flags |= FUSE_HAS_INODE_DAX;
 #endif
 	if (fm->fc->auto_submounts)
@@ -1779,7 +1779,7 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	sb->s_subtype = ctx->subtype;
 	ctx->subtype = NULL;
 	if (IS_ENABLED(CONFIG_FUSE_DAX)) {
-		err = fuse_dax_conn_alloc(fc, ctx->dax_mode, ctx->dax_dev);
+		err = fuse_vdax_conn_alloc(fc, ctx->vdax_mode, ctx->vdax_dev);
 		if (err)
 			goto err;
 	}
@@ -1788,7 +1788,7 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	fm->sb = sb;
 	err = fuse_bdi_init(fc, sb);
 	if (err)
-		goto err_free_dax;
+		goto err_free_vdax;
 
 	/* Handle umasking inside the fuse code */
 	if (sb->s_flags & SB_POSIXACL)
@@ -1811,7 +1811,7 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
 	set_default_d_op(sb, &fuse_dentry_operations);
 	root_dentry = d_make_root(root);
 	if (!root_dentry)
-		goto err_free_dax;
+		goto err_free_vdax;
 
 	mutex_lock(&fuse_mutex);
 	err = -EINVAL;
@@ -1837,9 +1837,9 @@ int fuse_fill_super_common(struct super_block *sb, struct fuse_fs_context *ctx)
  err_unlock:
 	mutex_unlock(&fuse_mutex);
 	dput(root_dentry);
- err_free_dax:
+ err_free_vdax:
 	if (IS_ENABLED(CONFIG_FUSE_DAX))
-		fuse_dax_conn_free(fc);
+		fuse_vdax_conn_free(fc);
  err:
 	return err;
 }
