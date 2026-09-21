@@ -253,6 +253,7 @@
  *  - add FUSE_HAS_SYNCFS opt-in flag for privileged userspace servers
  *  - add FUSE_NOTIFY_BACKING_CLOSE
  *  - add struct fuse_notify_backing_close_out
+ *  - add backing_id_64 to fuse_open_out
  *  - add backing_id to fuse_backing_map
  *  - add FUSE_BACKING_ID_64 (multiple structs)
  */
@@ -404,6 +405,7 @@ struct fuse_file_lock {
  *                           (FUSE_URING_ZERO_COPY) and the request carries page
  *                           payload. Otherwise reads/writes fall back to
  *                           copying.
+ * FUSE_BACKING_ID_64: backing ID is server allocated, stored in open_out.backing_id_64
  */
 #define FOPEN_DIRECT_IO		(1 << 0)
 #define FOPEN_KEEP_CACHE	(1 << 1)
@@ -414,6 +416,7 @@ struct fuse_file_lock {
 #define FOPEN_PARALLEL_DIRECT_WRITES	(1 << 6)
 #define FOPEN_PASSTHROUGH	(1 << 7)
 #define FOPEN_IO_URING_ZERO_COPY (1 << 8)
+#define FUSE_BACKING_ID_64	(1 << 30) /* used in multiple structs */
 
 /**
  * INIT request/reply flags
@@ -840,6 +843,7 @@ struct fuse_open_out {
 	uint64_t	fh;
 	uint32_t	open_flags;
 	int32_t		backing_id;
+	uint64_t	backing_id_64;
 };
 
 struct fuse_release_in {

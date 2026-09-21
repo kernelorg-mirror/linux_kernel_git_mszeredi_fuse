@@ -153,17 +153,17 @@ ssize_t fuse_passthrough_mmap(struct file *file, struct vm_area_struct *vma)
  *
  * Returns an fb object with elevated refcount to be stored in fuse inode.
  */
-struct fuse_backing *fuse_passthrough_open(struct file *file, int backing_id)
+struct fuse_backing *fuse_passthrough_open(struct file *file, u64 backing_id, bool is_64bit)
 {
 	struct fuse_file *ff = file->private_data;
 	struct fuse_conn *fc = ff->fm->fc;
 	struct fuse_backing *fb = NULL;
 	struct file *backing_file;
 
-	if (backing_id <= 0)
+	if (!is_64bit && (backing_id == 0 || backing_id > INT_MAX))
 		return fuse_ptr_EIO("invalid backing_id");
 
-	fb = fuse_backing_lookup(fc, backing_id, false);
+	fb = fuse_backing_lookup(fc, backing_id, is_64bit);
 	if (!fb)
 		return fuse_ptr_EIO("backing not found");
 

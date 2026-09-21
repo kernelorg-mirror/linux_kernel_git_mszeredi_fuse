@@ -170,7 +170,11 @@ static int fuse_file_passthrough_open(struct inode *inode, struct file *file)
 	struct fuse_file *ff = file->private_data;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	struct fuse_backing *fb;
+	u64 backing_id;
+	bool is_64bit = ff->open_flags & FUSE_BACKING_ID_64;
 	int err;
+
+	ff->open_flags &= ~FUSE_BACKING_ID_64;
 
 	/* Check allowed conditions for file open in passthrough mode */
 	if (!IS_ENABLED(CONFIG_FUSE_PASSTHROUGH) || !fc->passthrough)
@@ -179,7 +183,12 @@ static int fuse_file_passthrough_open(struct inode *inode, struct file *file)
 	if (ff->open_flags & ~FOPEN_PASSTHROUGH_MASK)
 		return fuse_EIO("conflicting open flags");
 
-	fb = fuse_passthrough_open(file, ff->args->open_outarg.backing_id);
+	if (!is_64bit)
+		backing_id = ff->args->open_outarg.backing_id;
+	else
+		backing_id = ff->args->open_outarg.backing_id_64;
+
+	fb = fuse_passthrough_open(file, backing_id, is_64bit);
 	if (IS_ERR(fb))
 		return PTR_ERR(fb);
 
