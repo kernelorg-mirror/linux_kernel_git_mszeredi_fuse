@@ -448,6 +448,9 @@ static int fuse_notify_map(struct fuse_conn *fc, unsigned int size,
 	if (err)
 		return err;
 
+	if (!fc->backing_id_64)
+		return -EINVAL;
+
 	if (outarg.num_extents > FUSE_MAX_EXTENTS)
 		return -EINVAL;
 
