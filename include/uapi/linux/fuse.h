@@ -255,6 +255,7 @@
  *  - add struct fuse_notify_backing_close_out
  *  - add backing_id_64 to fuse_open_out
  *  - add backing_id to fuse_backing_map
+ *  - add FUSE_BACKING_IS_DEV (fuse_backing_map.flags)
  *  - add FUSE_BACKING_ID_64 (multiple structs)
  */
 
@@ -1165,8 +1166,10 @@ struct fuse_notify_prune_out {
 /**
  * flags for fuse_backing_map
  *
+ * FUSE_BACKING_IS_DEV: @fd refers to a device file
  * FUSE_BACKING_ID_64: backing ID is server allocated, stored in @backing_id
  */
+#define FUSE_BACKING_IS_DEV	(1 << 0)
 #define FUSE_BACKING_ID_64	(1 << 30) /* used in multiple structs */
 
 struct fuse_backing_map {

@@ -167,9 +167,13 @@ struct fuse_backing *fuse_passthrough_open(struct file *file, u64 backing_id, bo
 	if (!fb)
 		return fuse_ptr_EIO("backing not found");
 
+	if (fb->type != FUSE_BACKING_PATH) {
+		fuse_backing_put(fb);
+		return fuse_ptr_EIO("invalid backing type");
+	}
+
 	/* Allocate backing file per fuse file to store fuse path */
-	backing_file = backing_file_open(file, file->f_flags,
-					 &fb->file->f_path, fb->cred);
+	backing_file = backing_file_open(file, file->f_flags, &fb->path, fb->cred);
 	if (IS_ERR(backing_file)) {
 		fuse_backing_put(fb);
 		return fuse_err_ptr_EIO("failed to open backing file", PTR_ERR(backing_file));

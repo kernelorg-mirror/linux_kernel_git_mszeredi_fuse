@@ -9,6 +9,7 @@
 #include "fuse_i.h"
 
 #include <linux/file.h>
+#include <linux/dax.h>
 #include <linux/rhashtable.h>
 
 static struct fuse_backing *fuse_backing_get(struct fuse_backing *fb)
@@ -22,9 +23,16 @@ static void fuse_backing_free(struct fuse_backing *fb)
 {
 	pr_debug("%s: fb=0x%p\n", __func__, fb);
 
-	if (fb->file)
-		fput(fb->file);
-	put_cred(fb->cred);
+	switch (fb->type) {
+	case FUSE_BACKING_PATH:
+		path_put(&fb->path);
+		put_cred(fb->cred);
+		break;
+
+	case FUSE_BACKING_DAXDEV:
+		fs_put_dax(fb->dax_dev, fb);
+		break;
+	}
 	kfree_rcu(fb, rcu);
 }
 
@@ -79,23 +87,88 @@ static struct fuse_backing *fuse_backing_id_remove(struct fuse_conn *fc, u64 id,
 	return fb;
 }
 
+static int fuse_dax_notify_failure(struct dax_device *daxdev, u64 offset, u64 len, int mf_flags)
+{
+	struct fuse_backing *fb = dax_holder(daxdev);
+
+	fb->dax_error = true;
+
+	return 0;
+}
+
+static const struct dax_holder_operations fuse_dax_holder_ops = {
+	.notify_failure		= fuse_dax_notify_failure,
+};
+
+static int fuse_backing_open_file(struct fuse_conn *fc, struct fuse_backing *fb, struct file *file,
+				  bool is_dev)
+{
+	struct inode *inode = file_inode(file);
+	struct dax_device *daxdev;
+	int err;
+
+	switch (inode->i_mode & S_IFMT) {
+	case S_IFREG:
+		if (is_dev)
+			return -EINVAL;
+		/* TODO: relax CAP_SYS_ADMIN once backing files are visible to lsof */
+		if (!fc->passthrough || !capable(CAP_SYS_ADMIN))
+			return -EPERM;
+
+		if (inode->i_sb->s_stack_depth >= fc->max_stack_depth)
+			return -ELOOP;
+
+		fb->type = FUSE_BACKING_PATH;
+		fb->path = file->f_path;
+		path_get(&fb->path);
+		fb->cred = get_current_cred();
+		return 0;
+
+	case S_IFCHR:
+		if (!is_dev)
+			return -EINVAL;
+		daxdev = dax_dev_find(inode->i_rdev);
+		if (!daxdev)
+			return -EINVAL;
+
+		err = -EPERM;
+		if (capable(CAP_SYS_RAWIO)) {
+			err = fs_dax_get(daxdev, fb, &fuse_dax_holder_ops);
+			if (!err) {
+				fb->type = FUSE_BACKING_DAXDEV;
+				fb->dax_dev = daxdev;
+			}
+		}
+		put_dax(daxdev);
+		return err;
+
+	case S_IFDIR:
+		if (is_dev)
+			return -EINVAL;
+		return -EISDIR;
+
+	default:
+		return -EINVAL;
+	}
+}
+
 int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 {
 	struct file *file;
-	struct super_block *backing_sb;
-	struct fuse_backing *fb;
+	struct fuse_backing *fb = kzalloc_obj(struct fuse_backing);
 	bool is_64bit = map->flags & FUSE_BACKING_ID_64;
 	int res;
 
+	if (!fb)
+		return -ENOMEM;
+
+	fb->backing_id = map->backing_id;
+	refcount_set(&fb->count, 1);
+
 	pr_debug("%s: fd=%d flags=0x%x\n", __func__, map->fd, map->flags);
 
-	/* TODO: relax CAP_SYS_ADMIN once backing files are visible to lsof */
-	res = -EPERM;
-	if (!fc->passthrough || !capable(CAP_SYS_ADMIN))
-		goto out;
-
 	res = -EINVAL;
-	if (map->flags & ~FUSE_BACKING_ID_64)
+	if (map->flags & ~(FUSE_BACKING_IS_DEV | FUSE_BACKING_ID_64))
 		goto out;
 
 	if (!is_64bit && map->backing_id != 0)
@@ -106,43 +179,21 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 	if (!file)
 		goto out;
 
-	/* read/write/splice/mmap passthrough only relevant for regular files */
-	res = d_is_dir(file->f_path.dentry) ? -EISDIR : -EINVAL;
-	if (!d_is_reg(file->f_path.dentry))
-		goto out_fput;
-
-	backing_sb = file_inode(file)->i_sb;
-	res = -ELOOP;
-	if (backing_sb->s_stack_depth >= fc->max_stack_depth)
-		goto out_fput;
-
-	fb = kmalloc_obj(struct fuse_backing);
-	res = -ENOMEM;
-	if (!fb)
-		goto out_fput;
-
-	fb->file = file;
-	fb->cred = get_current_cred();
-	fb->backing_id = map->backing_id;
-	refcount_set(&fb->count, 1);
+	res = fuse_backing_open_file(fc, fb, file, map->flags & FUSE_BACKING_IS_DEV);
+	fput(file);
+	if (res)
+		goto out;
 
 	if (is_64bit)
 		res = fuse_backing_add_64(fc, fb);
 	else
 		res = fuse_backing_id_alloc(fc, fb);
-	if (res < 0) {
-		fuse_backing_free(fb);
-		fb = NULL;
-	}
-
 out:
-	pr_debug("%s: fb=0x%p, ret=%i\n", __func__, fb, res);
+	pr_debug("%s: ret=%i\n", __func__, res);
+	if (res < 0)
+		fuse_backing_free(fb);
 
 	return res;
-
-out_fput:
-	fput(file);
-	goto out;
 }
 
 int fuse_backing_close(struct fuse_conn *fc, u64 backing_id, bool is_64bit)
