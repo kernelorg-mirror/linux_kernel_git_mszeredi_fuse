@@ -32,6 +32,10 @@ static void fuse_backing_free(struct fuse_backing *fb)
 	case FUSE_BACKING_DAXDEV:
 		fs_put_dax(fb->dax_dev, fb);
 		break;
+
+	case FUSE_BACKING_EXTMAP:
+		fuse_ext_map_destroy(&fb->extents);
+		break;
 	}
 	kfree_rcu(fb, rcu);
 }
@@ -252,8 +256,27 @@ static void fuse_backing_rht_free(void *p, void *data)
 
 void fuse_backing_files_free(struct fuse_conn *fc)
 {
+	struct rhashtable_iter iter;
+	struct fuse_backing *fb;
+
 	idr_for_each(&fc->backing_files_map, fuse_backing_idr_free, NULL);
 	idr_destroy(&fc->backing_files_map);
+
+	/*
+	 * extents are referencing other backings, put these refs before
+	 * destroying the backings themselves
+	 */
+	rhashtable_walk_enter(&fc->backing_64_ht, &iter);
+	rhashtable_walk_start(&iter);
+	while ((fb = rhashtable_walk_next(&iter))) {
+		/* Nothing changing the hash table, -EAGAIN not possible */
+		if (fb->type == FUSE_BACKING_EXTMAP) {
+			fuse_ext_map_destroy(&fb->extents);
+			fb->extents.rb_node = NULL;
+		}
+	}
+	rhashtable_walk_stop(&iter);
+	rhashtable_walk_exit(&iter);
 
 	rhashtable_free_and_destroy(&fc->backing_64_ht, fuse_backing_rht_free, NULL);
 }

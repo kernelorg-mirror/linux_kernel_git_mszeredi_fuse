@@ -251,12 +251,15 @@
  *
  *  7.47
  *  - add FUSE_HAS_SYNCFS opt-in flag for privileged userspace servers
- *  - add FUSE_NOTIFY_BACKING_CLOSE
+ *  - add FUSE_NOTIFY_BACKING_CLOSE, FUSE_NOTIFY_MAP
  *  - add struct fuse_notify_backing_close_out
+ *  - add struct fuse_notify_map_out
+ *  - add struct fuse_extent
  *  - add backing_id_64 to fuse_open_out
  *  - add backing_id to fuse_backing_map
  *  - add FUSE_BACKING_IS_DEV (fuse_backing_map.flags)
  *  - add FUSE_BACKING_ID_64 (multiple structs)
+ *  - add FUSE_MAP_BACKING_CREATE (fuse_notify_map_out.flags)
  */
 
 #ifndef _LINUX_FUSE_H
@@ -718,6 +721,7 @@ enum fuse_notify_code {
 	FUSE_NOTIFY_INC_EPOCH = 8,
 	FUSE_NOTIFY_PRUNE = 9,
 	FUSE_NOTIFY_BACKING_CLOSE = 10,
+	FUSE_NOTIFY_MAP = 11,
 };
 
 /* The read buffer is required to be at least 8k, but may be much larger */
@@ -1215,6 +1219,30 @@ struct fuse_copy_file_range_out {
 struct fuse_notify_backing_close_out {
 	uint64_t	backing_id;
 	uint64_t	reserved;
+};
+
+/**
+ * notify_map flags
+ *
+ * FUSE_MAP_BACKING_CREATE:	create backing with the supplied ID
+ */
+#define FUSE_MAP_BACKING_CREATE	(1 << 0)
+
+struct fuse_notify_map_out {
+	uint64_t	backing_id;
+	uint32_t	num_extents;
+	uint32_t	flags;
+	uint64_t	reserved[2];
+};
+
+#define FUSE_MAX_EXTENTS 1638
+
+struct fuse_extent {
+	uint64_t	offset;		/* offset of extent into file */
+	uint64_t	length;		/* extent length */
+	uint64_t	backing_id;	/* target backing */
+	uint64_t	addr;		/* target offset within backing file/device */
+	uint64_t	reserved[2];
 };
 
 #define FUSE_SETUPMAPPING_FLAG_WRITE (1ull << 0)
