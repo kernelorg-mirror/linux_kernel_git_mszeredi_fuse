@@ -9,6 +9,7 @@
 #include "fuse_i.h"
 
 #include <linux/file.h>
+#include <linux/rhashtable.h>
 
 static struct fuse_backing *fuse_backing_get(struct fuse_backing *fb)
 {
@@ -33,11 +34,6 @@ void fuse_backing_put(struct fuse_backing *fb)
 		fuse_backing_free(fb);
 }
 
-void fuse_backing_files_init(struct fuse_conn *fc)
-{
-	idr_init(&fc->backing_files_map);
-}
-
 static int fuse_backing_id_alloc(struct fuse_conn *fc, struct fuse_backing *fb)
 {
 	int id;
@@ -53,38 +49,42 @@ static int fuse_backing_id_alloc(struct fuse_conn *fc, struct fuse_backing *fb)
 	return id;
 }
 
-static struct fuse_backing *fuse_backing_id_remove(struct fuse_conn *fc,
-						   int id)
+static const struct rhashtable_params fuse_backing_params = {
+	.head_offset = offsetof(struct fuse_backing, hash_node),
+	.key_offset = offsetof(struct fuse_backing, backing_id),
+	.key_len = sizeof_field(struct fuse_backing, backing_id),
+};
+
+int fuse_backing_add_64(struct fuse_conn *fc, struct fuse_backing *fb)
+{
+	return rhashtable_insert_fast(&fc->backing_64_ht, &fb->hash_node, fuse_backing_params);
+}
+
+static struct fuse_backing *fuse_backing_id_remove(struct fuse_conn *fc, u64 id, bool is_64bit)
 {
 	struct fuse_backing *fb;
+	int err;
 
-	spin_lock(&fc->lock);
-	fb = idr_remove(&fc->backing_files_map, id);
-	spin_unlock(&fc->lock);
+	guard(spinlock)(&fc->lock);
+	if (!is_64bit)
+		return idr_remove(&fc->backing_files_map, id);
+
+	fb = rhashtable_lookup_fast(&fc->backing_64_ht, &id, fuse_backing_params);
+	if (!fb)
+		return NULL;
+
+	err = rhashtable_remove_fast(&fc->backing_64_ht, &fb->hash_node, fuse_backing_params);
+	WARN_ON(err);
 
 	return fb;
-}
-
-static int fuse_backing_id_free(int id, void *p, void *data)
-{
-	struct fuse_backing *fb = p;
-
-	WARN_ON_ONCE(refcount_read(&fb->count) != 1);
-	fuse_backing_free(fb);
-	return 0;
-}
-
-void fuse_backing_files_free(struct fuse_conn *fc)
-{
-	idr_for_each(&fc->backing_files_map, fuse_backing_id_free, NULL);
-	idr_destroy(&fc->backing_files_map);
 }
 
 int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 {
 	struct file *file;
 	struct super_block *backing_sb;
-	struct fuse_backing *fb = NULL;
+	struct fuse_backing *fb;
+	bool is_64bit = map->flags & FUSE_BACKING_ID_64;
 	int res;
 
 	pr_debug("%s: fd=%d flags=0x%x\n", __func__, map->fd, map->flags);
@@ -95,7 +95,10 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 		goto out;
 
 	res = -EINVAL;
-	if (map->flags || map->padding)
+	if (map->flags & ~FUSE_BACKING_ID_64)
+		goto out;
+
+	if (!is_64bit && map->backing_id != 0)
 		goto out;
 
 	file = fget_raw(map->fd);
@@ -120,9 +123,13 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 
 	fb->file = file;
 	fb->cred = get_current_cred();
+	fb->backing_id = map->backing_id;
 	refcount_set(&fb->count, 1);
 
-	res = fuse_backing_id_alloc(fc, fb);
+	if (is_64bit)
+		res = fuse_backing_add_64(fc, fb);
+	else
+		res = fuse_backing_id_alloc(fc, fb);
 	if (res < 0) {
 		fuse_backing_free(fb);
 		fb = NULL;
@@ -138,24 +145,19 @@ out_fput:
 	goto out;
 }
 
-int fuse_backing_close(struct fuse_conn *fc, int backing_id)
+int fuse_backing_close(struct fuse_conn *fc, u64 backing_id, bool is_64bit)
 {
 	struct fuse_backing *fb = NULL;
 	int err;
 
-	pr_debug("%s: backing_id=%d\n", __func__, backing_id);
-
-	/* TODO: relax CAP_SYS_ADMIN once backing files are visible to lsof */
-	err = -EPERM;
-	if (!fc->passthrough || !capable(CAP_SYS_ADMIN))
-		goto out;
+	pr_debug("%s: backing_id=%lld\n", __func__, backing_id);
 
 	err = -EINVAL;
-	if (backing_id <= 0)
+	if (!is_64bit && (backing_id == 0 || backing_id > INT_MAX))
 		goto out;
 
 	err = -ENOENT;
-	fb = fuse_backing_id_remove(fc, backing_id);
+	fb = fuse_backing_id_remove(fc, backing_id, is_64bit);
 	if (!fb)
 		goto out;
 
@@ -167,14 +169,49 @@ out:
 	return err;
 }
 
-struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, int backing_id)
+struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, u64 backing_id, bool is_64bit)
 {
 	struct fuse_backing *fb;
 
-	rcu_read_lock();
-	fb = idr_find(&fc->backing_files_map, backing_id);
-	fb = fuse_backing_get(fb);
-	rcu_read_unlock();
+	guard(rcu)();
+	if (!is_64bit)
+		fb = idr_find(&fc->backing_files_map, backing_id);
+	else
+		fb = rhashtable_lookup(&fc->backing_64_ht, &backing_id, fuse_backing_params);
 
-	return fb;
+	return fuse_backing_get(fb);
+}
+
+static void fuse_backing_check_free(struct fuse_backing *fb)
+{
+	WARN_ON_ONCE(refcount_read(&fb->count) != 1);
+	fuse_backing_free(fb);
+}
+
+static int fuse_backing_idr_free(int id, void *p, void *data)
+{
+	fuse_backing_check_free(p);
+	return 0;
+}
+
+static void fuse_backing_rht_free(void *p, void *data)
+{
+	fuse_backing_check_free(p);
+}
+
+void fuse_backing_files_free(struct fuse_conn *fc)
+{
+	idr_for_each(&fc->backing_files_map, fuse_backing_idr_free, NULL);
+	idr_destroy(&fc->backing_files_map);
+
+	rhashtable_free_and_destroy(&fc->backing_64_ht, fuse_backing_rht_free, NULL);
+}
+
+void fuse_backing_files_init(struct fuse_conn *fc)
+{
+	int err;
+
+	idr_init(&fc->backing_files_map);
+	err = rhashtable_init(&fc->backing_64_ht, &fuse_backing_params);
+	WARN_ON(err); /* fails on programming error only */
 }

@@ -409,6 +409,26 @@ static int fuse_notify_prune(struct fuse_conn *fc, unsigned int size,
 	return 0;
 }
 
+static int fuse_notify_backing_close(struct fuse_conn *fc, unsigned int size,
+				     struct fuse_copy_state *cs)
+{
+	struct fuse_notify_backing_close_out outarg;
+	int err;
+
+	if (size != sizeof(outarg))
+		return -EINVAL;
+
+	err = fuse_copy_one(cs, &outarg, sizeof(outarg));
+	if (err)
+		return err;
+
+	if (outarg.reserved)
+		return -EINVAL;
+
+	return fuse_backing_close(fc, outarg.backing_id, true);
+
+}
+
 int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		unsigned int size, struct fuse_copy_state *cs)
 {
@@ -439,6 +459,9 @@ int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 
 	case FUSE_NOTIFY_PRUNE:
 		return fuse_notify_prune(fc, size, cs);
+
+	case FUSE_NOTIFY_BACKING_CLOSE:
+		return fuse_notify_backing_close(fc, size, cs);
 
 	default:
 		return -EINVAL;

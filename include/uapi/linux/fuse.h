@@ -251,6 +251,10 @@
  *
  *  7.47
  *  - add FUSE_HAS_SYNCFS opt-in flag for privileged userspace servers
+ *  - add FUSE_NOTIFY_BACKING_CLOSE
+ *  - add struct fuse_notify_backing_close_out
+ *  - add backing_id to fuse_backing_map
+ *  - add FUSE_BACKING_ID_64 (multiple structs)
  */
 
 #ifndef _LINUX_FUSE_H
@@ -709,6 +713,7 @@ enum fuse_notify_code {
 	FUSE_NOTIFY_RESEND = 7,
 	FUSE_NOTIFY_INC_EPOCH = 8,
 	FUSE_NOTIFY_PRUNE = 9,
+	FUSE_NOTIFY_BACKING_CLOSE = 10,
 };
 
 /* The read buffer is required to be at least 8k, but may be much larger */
@@ -1153,10 +1158,17 @@ struct fuse_notify_prune_out {
 	uint64_t	spare;
 };
 
+/**
+ * flags for fuse_backing_map
+ *
+ * FUSE_BACKING_ID_64: backing ID is server allocated, stored in @backing_id
+ */
+#define FUSE_BACKING_ID_64	(1 << 30) /* used in multiple structs */
+
 struct fuse_backing_map {
 	int32_t		fd;
 	uint32_t	flags;
-	uint64_t	padding;
+	uint64_t	backing_id;
 };
 
 /* Device ioctls: */
@@ -1191,6 +1203,11 @@ struct fuse_copy_file_range_in {
 /* For FUSE_COPY_FILE_RANGE_64 */
 struct fuse_copy_file_range_out {
 	uint64_t	bytes_copied;
+};
+
+struct fuse_notify_backing_close_out {
+	uint64_t	backing_id;
+	uint64_t	reserved;
 };
 
 #define FUSE_SETUPMAPPING_FLAG_WRITE (1ull << 0)

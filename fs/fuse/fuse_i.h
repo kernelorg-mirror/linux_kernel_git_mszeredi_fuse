@@ -28,7 +28,7 @@
 #include <linux/backing-dev.h>
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
-#include <linux/rbtree.h>
+#include <linux/rbtree_types.h>
 #include <linux/poll.h>
 #include <linux/workqueue.h>
 #include <linux/kref.h>
@@ -36,6 +36,7 @@
 #include <linux/pid_namespace.h>
 #include <linux/refcount.h>
 #include <linux/user_namespace.h>
+#include <linux/rhashtable-types.h>
 
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
@@ -96,7 +97,8 @@ struct fuse_submount_lookup {
 struct fuse_backing {
 	struct file *file;
 	const struct cred *cred;
-
+	u64 backing_id;
+	struct rhash_head hash_node;
 	/* refcount */
 	refcount_t count;
 	struct rcu_head rcu;
@@ -776,6 +778,9 @@ struct fuse_conn {
 #ifdef CONFIG_FUSE_PASSTHROUGH
 	/** @backing_files_map: IDR for backing files ids */
 	struct idr backing_files_map;
+
+	/** @backing_64_ht: 64 bit ID lookup hash table */
+	struct rhashtable backing_64_ht;
 #endif
 };
 
@@ -1274,7 +1279,9 @@ void fuse_file_release(struct inode *inode, struct fuse_file *ff,
 /* backing.c */
 #ifdef CONFIG_FUSE_PASSTHROUGH
 void fuse_backing_put(struct fuse_backing *fb);
-struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, int backing_id);
+
+struct fuse_backing *fuse_backing_lookup(struct fuse_conn *fc, u64 backing_id, bool is_64bit);
+int fuse_backing_add_64(struct fuse_conn *fc, struct fuse_backing *fb);
 #else
 
 static inline void fuse_backing_put(struct fuse_backing *fb)

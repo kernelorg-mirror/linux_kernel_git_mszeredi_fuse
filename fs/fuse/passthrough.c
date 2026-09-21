@@ -163,7 +163,7 @@ struct fuse_backing *fuse_passthrough_open(struct file *file, int backing_id)
 	if (backing_id <= 0)
 		return fuse_ptr_EIO("invalid backing_id");
 
-	fb = fuse_backing_lookup(fc, backing_id);
+	fb = fuse_backing_lookup(fc, backing_id, false);
 	if (!fb)
 		return fuse_ptr_EIO("backing not found");
 
