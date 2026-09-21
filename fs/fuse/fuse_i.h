@@ -11,6 +11,12 @@
 # define pr_fmt(fmt) "fuse: " fmt
 #endif
 
+#define fuse_EIO(msg) (pr_notice_once("%s: %s\n", __func__, msg), -EIO)
+#define fuse_err_EIO(msg, err) (pr_notice_once("%s: %s (%d)\n", __func__, msg, (int) (err)), -EIO)
+
+#define fuse_ptr_EIO(msg) ERR_PTR(fuse_EIO(msg))
+#define fuse_err_ptr_EIO(msg, err) ERR_PTR(fuse_err_EIO(msg, err))
+
 #include "args.h"
 #include <linux/fuse.h>
 #include <linux/fs.h>
