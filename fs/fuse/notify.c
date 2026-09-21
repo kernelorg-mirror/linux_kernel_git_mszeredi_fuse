@@ -453,7 +453,7 @@ static int fuse_notify_map(struct fuse_conn *fc, unsigned int size,
 	if (outarg.reserved[0] != 0 || outarg.reserved[1] != 0)
 		return -EINVAL;
 
-	if (outarg.flags & ~FUSE_MAP_BACKING_CREATE)
+	if (outarg.flags & ~(FUSE_MAP_BACKING_CREATE | FUSE_MAP_CYCLIC))
 		return -EINVAL;
 
 	ext = kvmalloc_objs(*ext, outarg.num_extents);

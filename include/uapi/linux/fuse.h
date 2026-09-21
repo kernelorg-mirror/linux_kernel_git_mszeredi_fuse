@@ -259,7 +259,7 @@
  *  - add backing_id to fuse_backing_map
  *  - add FUSE_BACKING_IS_DEV (fuse_backing_map.flags)
  *  - add FUSE_BACKING_ID_64 (multiple structs)
- *  - add FUSE_MAP_BACKING_CREATE (fuse_notify_map_out.flags)
+ *  - add FUSE_MAP_CYCLIC, FUSE_MAP_BACKING_CREATE (fuse_map_out.flags)
  */
 
 #ifndef _LINUX_FUSE_H
@@ -1225,8 +1225,10 @@ struct fuse_notify_backing_close_out {
  * notify_map flags
  *
  * FUSE_MAP_BACKING_CREATE:	create backing with the supplied ID
+ * FUSE_MAP_CYCLIC:		map repeats after last extent
  */
 #define FUSE_MAP_BACKING_CREATE	(1 << 0)
+#define FUSE_MAP_CYCLIC		(1 << 1)
 
 struct fuse_notify_map_out {
 	uint64_t	backing_id;
